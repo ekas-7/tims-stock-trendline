@@ -38,8 +38,8 @@ def simple_polling_tracker():
 
 
 @app.route("/tracker/v2", methods=["GET"])
-def finally_we_have_sse():
-    """Uses SSE to stream the stock prices"""
+def finally_we_can_sse():
+    """Uses SSE event stream for updating the stock prices"""
 
     def _streamer(last_event_id: int | None = None):
         with app.app_context():
