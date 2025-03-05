@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2 - Live Stock Prices</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <h1>📈 The faster - fastest stock price viewer on the planet</h1>
+    <p id="price" style="font-size: 1.4rem;">Waiting for data...</p>
+    <div><canvas id="stockChart" height="100"></canvas></div>
+    <script>
+        const eventSource = new EventSource("http://127.0.0.1:8080/tracker/v2");
+        const maxDataPoints = 40;
+        const ctx = document.getElementById("stockChart").getContext("2d");
+
+        const stockChart = new Chart(ctx, {
+            type: "line",
+            data: { labels: [], datasets: [{ label: "Price ($)", data: [], borderColor: "blue" , tension: 0.2}, { label: "Average Price of last 5 trades ($)", data: [], borderColor: "red" , tension: 0.2}] },
+            options: { scales: { x: { display: true }, y: { display: true, min: 100, max: 200 } , responsive: false} }
+        });
+
+        function addAveragePoint() {
+            // Calculate the average of last 3 data points
+            const lastThreePrices = stockChart.data.datasets[0].data.slice(-5);
+            const average = lastThreePrices.reduce((a, b) => a + b, 0) / lastThreePrices.length;
+            stockChart.data.datasets[1].data.push(average);
+        }
+        
+        eventSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            document.getElementById("price").innerText = `💰 Price: $${data.price} at ${data.created_at}`;
+
+            stockChart.data.labels.push(data.created_at);
+            stockChart.data.datasets[0].data.push(data.price);
+            addAveragePoint();
+            stockChart.update();
+            
+            if (stockChart.data.labels.length > maxDataPoints) {
+                stockChart.data.labels.shift();
+                stockChart.data.datasets[0].data.shift();
+                stockChart.data.datasets[1].data.shift();
+                stockChart.update();
+            }
+        };
+    </script>
+</body>
+</html>
