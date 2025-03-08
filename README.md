@@ -47,7 +47,7 @@ make run
 uv run flask run --port 8080 --reload
 ```
 
-The three implementations can be viewed under:
+The three iterative improvements can be viewed under:
 - [The Beginning](1.%20The%20Beginning/)
 - [The SSE Revolution](2.%20The%20SSE%20Revolution/)
 - [You should try LISTENing](3.%20You%20should%20try%20LISTENing/)

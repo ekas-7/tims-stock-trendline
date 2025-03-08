@@ -59,7 +59,6 @@ def listen_closely_to_postgres():
     """Uses Postgres LISTEN/NOTIFY to stream the stock prices"""
 
     def _streamer(last_event_id: int | None = None):
-        # Needs extra logic to handle cases for last_event_id.
         # HINT: Check out redis pub/sub for inspiration
         with app.app_context():
             connection = db.engine.raw_connection()
