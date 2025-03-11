@@ -76,3 +76,130 @@ def listen_closely_to_postgres():
 
     last_event_id = request.headers.get("Last-Event-ID")
     return _streamer(last_event_id), 200, {"Content-Type": "text/event-stream"}
+
+
+@app.route("/tracker/v4", methods=["GET"])
+def pq_caching_tracker():
+    """Uses PostgreSQL for caching stock prices to improve performance"""
+
+    def _streamer(last_event_id: int | None = None):
+        with app.app_context():
+            connection = db.engine.raw_connection()
+            cursor = connection.cursor()
+            
+            # Create a temporary table for caching if it doesn't exist
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stock_price_cache (
+                    id SERIAL PRIMARY KEY,
+                    price_id INTEGER REFERENCES stock_price(id),
+                    payload JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    accessed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create index for faster lookups
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stock_price_cache_price_id ON stock_price_cache(price_id)
+            """)
+            
+            # Create or replace a function to update the cache
+            cursor.execute("""
+                CREATE OR REPLACE FUNCTION update_stock_price_cache() RETURNS TRIGGER AS $$
+                BEGIN
+                    INSERT INTO stock_price_cache (price_id, payload)
+                    VALUES (NEW.id, (SELECT json_build_object(
+                        'id', NEW.id,
+                        'price', NEW.price,
+                        'created_at', NEW.created_at
+                    )));
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+            """)
+            
+            # Create trigger if it doesn't exist (first check if it exists)
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_trigger 
+                    WHERE tgname = 'stock_price_cache_trigger'
+                )
+            """)
+            trigger_exists = cursor.fetchone()[0]
+            
+            if not trigger_exists:
+                cursor.execute("""
+                    CREATE TRIGGER stock_price_cache_trigger
+                    AFTER INSERT ON stock_price
+                    FOR EACH ROW
+                    EXECUTE FUNCTION update_stock_price_cache();
+                """)
+            
+            connection.commit()
+            
+            # Function to clean up old cache entries (run periodically)
+            cursor.execute("""
+                CREATE OR REPLACE FUNCTION cleanup_stock_price_cache() RETURNS void AS $$
+                BEGIN
+                    DELETE FROM stock_price_cache 
+                    WHERE created_at < NOW() - INTERVAL '1 day'
+                    AND accessed_at < NOW() - INTERVAL '1 hour';
+                END;
+                $$ LANGUAGE plpgsql;
+            """)
+            
+            # Set up LISTEN/NOTIFY for cache invalidation
+            cursor.execute('LISTEN "stock_price_insert";')
+            connection.commit()
+            
+            # Get initial data from cache if available
+            base_query = """
+                SELECT payload FROM stock_price_cache
+                WHERE price_id > %s
+                ORDER BY price_id ASC
+            """
+            
+            # Use 0 if last_event_id is None
+            cursor.execute(base_query, (last_event_id or 0,))
+            cached_results = cursor.fetchall()
+            
+            # Send cached results immediately
+            for cached_result in cached_results:
+                payload = cached_result[0]
+                price_id = payload['id']
+                
+                # Update access time to indicate this cache entry was used
+                cursor.execute("""
+                    UPDATE stock_price_cache 
+                    SET accessed_at = CURRENT_TIMESTAMP
+                    WHERE price_id = %s
+                """, (price_id,))
+                connection.commit()
+                
+                yield f"id: {price_id}\ndata: {json.dumps(payload, default=str)}\n\n"
+            
+            # Then listen for new notifications
+            last_processed_id = max([r[0]['id'] for r in cached_results]) if cached_results else (last_event_id or 0)
+            
+            while True:
+                connection.poll()
+                while connection.notifies:
+                    notify = connection.notifies.pop(0)
+                    payload = json.loads(notify.payload)
+                    price_id = payload["id"]
+                    
+                    # Only process if this is a new price we haven't sent yet
+                    if price_id > last_processed_id:
+                        last_processed_id = price_id
+                        
+                        # Run cache cleanup occasionally (probabilistic to avoid doing it too often)
+                        if price_id % 20 == 0:  # Every ~20 notifications
+                            cursor.execute("SELECT cleanup_stock_price_cache()")
+                            connection.commit()
+                        
+                        yield f"id: {price_id}\ndata: {notify.payload}\n\n"
+
+    last_event_id = request.headers.get("Last-Event-ID")
+    return _streamer(last_event_id), 200, {"Content-Type": "text/event-stream"}
+
+
